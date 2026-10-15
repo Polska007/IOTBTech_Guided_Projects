@@ -4,8 +4,17 @@
 *.tfstate.*
 terraform.tfvars
 crash.log
+
 # Keys and secrets
 *.pem
 *.key
 id_*
 .env
+.env.*
+!.env.example
+!.env.local.example
+
+# Dependencies and build output
+node_modules/
+.next/
+dist/

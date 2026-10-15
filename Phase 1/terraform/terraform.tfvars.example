@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars (git-ignored) and fill in your own values
+region          = "eu-west-1"
+vpc_cidr        = "10.0.0.0/16"
+subnet_cidr     = "10.0.1.0/24"
+instance_type   = "c7i-flex.large"
+my_ip_cidr      = "YOUR.PUBLIC.IP/32"
+public_key_path = "C:/Users/<you>/.ssh/id_ed25519.pub"
