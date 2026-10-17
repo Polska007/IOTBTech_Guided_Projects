@@ -1,0 +1,28 @@
+name: Simple CI/CD Pipeline
+
+# Trigger the pipeline on every push to the main branch
+on:
+  push:
+    branches: [ master ]
+
+jobs:
+  # Continuous Integration (CI) Job
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Run Build Step
+        run: echo "Compiling the application..."
+
+      - name: Run Tests
+        run: echo "Running automated unit tests..."
+
+  # Continuous Deployment (CD) Job
+  deploy:
+    needs: build-and-test # Only runs if the build-and-test job succeeds
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to Production
+        run: echo "Deploying application to the production server..."
