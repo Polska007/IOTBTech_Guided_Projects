@@ -1,5 +1,7 @@
 ---
-# Playbook: install and start Docker on the managed node(s), then test it.
+# Playbook: install and start Docker on the managed node(s), install AWS CLI,
+# then verify the configuration.
+
 - name: Configure managed nodes with Docker
   hosts: managed
   become: true
@@ -10,12 +12,43 @@
         update_cache: true
         upgrade: dist
 
-    - name: Install Docker and the Python Docker SDK (used by Ansible's docker module)
+    - name: Install Docker and the Python Docker SDK
       ansible.builtin.apt:
         name:
           - docker.io
           - python3-docker
         state: present
+
+    - name: Install packages required for AWS CLI
+      ansible.builtin.apt:
+        name:
+          - curl
+          - unzip
+        state: present
+
+    - name: Check whether AWS CLI is already installed
+      ansible.builtin.command: aws --version
+      register: aws_cli_check
+      changed_when: false
+      failed_when: false
+
+    - name: Download AWS CLI v2 installer
+      ansible.builtin.get_url:
+        url: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+        dest: /tmp/awscliv2.zip
+        mode: "0644"
+      when: aws_cli_check.rc != 0
+
+    - name: Extract AWS CLI v2 installer
+      ansible.builtin.unarchive:
+        src: /tmp/awscliv2.zip
+        dest: /tmp
+        remote_src: true
+      when: aws_cli_check.rc != 0
+
+    - name: Install AWS CLI v2
+      ansible.builtin.command: /tmp/aws/install
+      when: aws_cli_check.rc != 0
 
     - name: Start Docker and enable it on boot
       ansible.builtin.service:
@@ -23,7 +56,7 @@
         state: started
         enabled: true
 
-    - name: Allow the ubuntu user to run docker without sudo
+    - name: Allow the ubuntu user to run Docker without sudo
       ansible.builtin.user:
         name: ubuntu
         groups: docker
@@ -38,9 +71,17 @@
       ansible.builtin.debug:
         msg: "{{ docker_version.stdout }}"
 
+    - name: Check the AWS CLI version
+      ansible.builtin.command: aws --version
+      register: aws_version
+      changed_when: false
+
+    - name: Show the AWS CLI version
+      ansible.builtin.debug:
+        msg: "{{ aws_version.stdout }}"
+
     - name: Run the hello-world test container
       ansible.builtin.command: docker run --rm hello-world
-      register: hello
       changed_when: false
 
     - name: Run an nginx container on port 80

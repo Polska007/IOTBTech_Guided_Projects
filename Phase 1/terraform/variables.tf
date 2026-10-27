@@ -10,16 +10,16 @@ variable "project_name" {
 }
 
 variable "vpc_cidr" {
-  type    = string
+  type = string
 }
 
 variable "subnet_cidr" {
-  type    = string
- 
+  type = string
+
 }
 
 variable "instance_type" {
-  type    = string
+  type = string
 }
 
 variable "managed_count" {
