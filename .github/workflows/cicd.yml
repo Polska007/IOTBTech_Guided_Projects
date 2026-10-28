@@ -828,7 +828,7 @@ jobs:
             --arg jwt_parameter "$JWT_PARAMETER_NAME" \
             '{
               commands: [
-                "set -euo pipefail",
+                "set -eu",
 
                 "mkdir -p /opt/zeetafin",
 
