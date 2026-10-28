@@ -32,10 +32,6 @@ resource "aws_iam_openid_connect_provider" "github_actions" {
 
 ###############################################################################
 # GitHub Actions IAM Role
-#
-# Trust is restricted to:
-# Repository: Polska007/IOTBTech_Guided_Projects
-# Branch: main
 ###############################################################################
 
 resource "aws_iam_role" "github_actions" {
@@ -58,7 +54,7 @@ resource "aws_iam_role" "github_actions" {
         Condition = {
           StringEquals = {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-            "token.actions.githubusercontent.com:sub" = "repo:Polska007/IOTBTech_Guided_Projects:ref:refs/heads/main"
+            "token.actions.githubusercontent.com:sub" = "repo:Polska007@42054176/IOTBTech_Guided_Projects@1408553764:ref:refs/heads/main"
           }
         }
       }
@@ -84,9 +80,11 @@ resource "aws_iam_policy" "github_actions_deployment" {
     Version = "2012-10-17"
 
     Statement = [
+
       #########################################################################
       # Authenticate to Amazon ECR
       #########################################################################
+
       {
         Sid    = "ECRAuthentication"
         Effect = "Allow"
@@ -99,8 +97,9 @@ resource "aws_iam_policy" "github_actions_deployment" {
       },
 
       #########################################################################
-      # Push backend and frontend Docker images
+      # Push ZeetaFin images to ECR
       #########################################################################
+
       {
         Sid    = "ECRPushZeetaFinImages"
         Effect = "Allow"
@@ -122,8 +121,9 @@ resource "aws_iam_policy" "github_actions_deployment" {
       },
 
       #########################################################################
-      # Send deployment command to managed EC2 through Systems Manager
+      # Send deployment command through AWS Systems Manager
       #########################################################################
+
       {
         Sid    = "SendSSMDeploymentCommand"
         Effect = "Allow"
@@ -141,8 +141,9 @@ resource "aws_iam_policy" "github_actions_deployment" {
       },
 
       #########################################################################
-      # Read deployment command results
+      # Read SSM deployment results
       #########################################################################
+
       {
         Sid    = "ReadSSMDeploymentResults"
         Effect = "Allow"
@@ -157,8 +158,9 @@ resource "aws_iam_policy" "github_actions_deployment" {
       },
 
       #########################################################################
-      # Verify the managed instance is online in SSM
+      # Verify managed EC2 status
       #########################################################################
+
       {
         Sid    = "DescribeSSMManagedInstances"
         Effect = "Allow"
@@ -168,6 +170,24 @@ resource "aws_iam_policy" "github_actions_deployment" {
         ]
 
         Resource = "*"
+      },
+
+      #########################################################################
+      # Temporary Parameter Store secrets used during deployment
+      #########################################################################
+
+      {
+        Sid    = "ManageTemporaryDeploymentParameters"
+        Effect = "Allow"
+
+        Action = [
+          "ssm:PutParameter",
+          "ssm:DeleteParameter"
+        ]
+
+        Resource = [
+          "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter/zeetafin/deployments/*"
+        ]
       }
     ]
   })
@@ -180,10 +200,39 @@ resource "aws_iam_policy" "github_actions_deployment" {
 }
 
 ###############################################################################
-# Attach deployment permissions to GitHub Actions role
+# Attach deployment policy to GitHub Actions role
 ###############################################################################
 
 resource "aws_iam_role_policy_attachment" "github_actions_deployment" {
   role       = aws_iam_role.github_actions.name
   policy_arn = aws_iam_policy.github_actions_deployment.arn
+}
+
+###############################################################################
+# Managed EC2 - read temporary deployment parameters
+###############################################################################
+
+resource "aws_iam_role_policy" "managed_deployment_parameters" {
+  name = "${var.project_name}-managed-deployment-parameters"
+
+  role = aws_iam_role.managed_ecr_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+
+    Statement = [
+      {
+        Sid    = "ReadTemporaryDeploymentParameters"
+        Effect = "Allow"
+
+        Action = [
+          "ssm:GetParameter"
+        ]
+
+        Resource = [
+          "arn:aws:ssm:${var.region}:${data.aws_caller_identity.current.account_id}:parameter/zeetafin/deployments/*"
+        ]
+      }
+    ]
+  })
 }
