@@ -24,7 +24,13 @@ env:
   BACKEND_REPOSITORY: zeetafin-be
   FRONTEND_REPOSITORY: zeetafin-fe
 
+
 jobs:
+
+  ###########################################################################
+  # BUILD AND PUSH
+  ###########################################################################
+
   build-and-push:
     name: Build and Push Images
     runs-on: ubuntu-latest
@@ -33,18 +39,70 @@ jobs:
       image_tag: ${{ steps.image.outputs.tag }}
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
+
 
       - name: Set image tag
         id: image
         run: |
           echo "tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Debug GitHub OIDC claims
-        uses: github/actions-oidc-debugger@main
-        with:
-        audience: sts.amazonaws.com    
+
+      #######################################################################
+      # TEMPORARY OIDC DIAGNOSTIC
+      #
+      # Keep this until the OIDC trust relationship has been confirmed.
+      #######################################################################
+
+      - name: Show GitHub OIDC claims
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RESPONSE="$(
+            curl \
+              --silent \
+              --show-error \
+              --fail \
+              -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com"
+          )"
+
+          TOKEN="$(
+            printf '%s' "$RESPONSE" |
+            jq -r '.value'
+          )"
+
+          TOKEN="$TOKEN" python3 <<'PY'
+          import os
+          import json
+          import base64
+
+          token = os.environ["TOKEN"]
+
+          payload = token.split(".")[1]
+
+          payload += "=" * (-len(payload) % 4)
+
+          claims = json.loads(
+              base64.urlsafe_b64decode(payload).decode()
+          )
+
+          print("aud:", claims.get("aud"))
+          print("sub:", claims.get("sub"))
+          print("repository:", claims.get("repository"))
+          print("repository_id:", claims.get("repository_id"))
+          print("repository_owner:", claims.get("repository_owner"))
+          print("repository_owner_id:", claims.get("repository_owner_id"))
+          print("ref:", claims.get("ref"))
+          PY
+
+
+      #######################################################################
+      # AWS OIDC AUTHENTICATION
+      #######################################################################
 
       - name: Configure AWS credentials using GitHub OIDC
         uses: aws-actions/configure-aws-credentials@v4
@@ -52,17 +110,30 @@ jobs:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+
       - name: Verify assumed AWS identity
         run: |
           aws sts get-caller-identity
 
-      - name: Log in to Amazon ECR
+
+      #######################################################################
+      # AMAZON ECR
+      #######################################################################
+
+      - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
+
 
       - name: Define ECR registry
         run: |
-          echo "ECR_REGISTRY=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com" \
+          echo \
+            "ECR_REGISTRY=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com" \
             >> "$GITHUB_ENV"
+
+
+      #######################################################################
+      # BUILD BACKEND
+      #######################################################################
 
       - name: Build backend image
         run: |
@@ -73,6 +144,11 @@ jobs:
             --tag "$ECR_REGISTRY/$BACKEND_REPOSITORY:latest" \
             "Phase 2/ZeetaFin-BE"
 
+
+      #######################################################################
+      # BUILD FRONTEND
+      #######################################################################
+
       - name: Build frontend image
         run: |
           set -euo pipefail
@@ -81,6 +157,11 @@ jobs:
             --tag "$ECR_REGISTRY/$FRONTEND_REPOSITORY:$GITHUB_SHA" \
             --tag "$ECR_REGISTRY/$FRONTEND_REPOSITORY:latest" \
             "Phase 2/ZeetaFin-FE"
+
+
+      #######################################################################
+      # VERIFY IMAGES
+      #######################################################################
 
       - name: Verify built images
         run: |
@@ -96,6 +177,11 @@ jobs:
 
           echo "Backend and frontend images built successfully."
 
+
+      #######################################################################
+      # PUSH IMAGES
+      #######################################################################
+
       - name: Push backend image to Amazon ECR
         run: |
           set -euo pipefail
@@ -105,6 +191,7 @@ jobs:
 
           docker push \
             "$ECR_REGISTRY/$BACKEND_REPOSITORY:latest"
+
 
       - name: Push frontend image to Amazon ECR
         run: |
@@ -116,15 +203,26 @@ jobs:
           docker push \
             "$ECR_REGISTRY/$FRONTEND_REPOSITORY:latest"
 
+
+      #######################################################################
+      # BUILD SUMMARY
+      #######################################################################
+
       - name: Publish build summary
         run: |
           {
             echo "## ZeetaFin images published"
             echo
-            echo "- Backend: \`$ECR_REGISTRY/$BACKEND_REPOSITORY:$GITHUB_SHA\`"
-            echo "- Frontend: \`$ECR_REGISTRY/$FRONTEND_REPOSITORY:$GITHUB_SHA\`"
+            echo "- Backend tag: \`$GITHUB_SHA\`"
+            echo "- Frontend tag: \`$GITHUB_SHA\`"
             echo "- Additional tag: \`latest\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+
+
+  ###########################################################################
+  # DEPLOY
+  ###########################################################################
 
   deploy:
     name: Deploy Through AWS Systems Manager
@@ -140,15 +238,27 @@ jobs:
       JWT_PARAMETER_NAME: >-
         /zeetafin/deployments/${{ github.run_id }}/jwt-secret
 
+
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
+
+
+      #######################################################################
+      # AWS OIDC
+      #######################################################################
 
       - name: Configure AWS credentials using GitHub OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+
+
+      #######################################################################
+      # VERIFY SSM NODE
+      #######################################################################
 
       - name: Verify managed EC2 is online
         run: |
@@ -166,11 +276,15 @@ jobs:
 
           echo "Managed EC2 SSM status: $PING_STATUS"
 
-          if [ "$PING_STATUS" != "Online" ]
-          then
+          if [ "$PING_STATUS" != "Online" ]; then
             echo "Managed EC2 is not online in Systems Manager."
             exit 1
           fi
+
+
+      #######################################################################
+      # TEMPORARY DEPLOYMENT SECRETS
+      #######################################################################
 
       - name: Store temporary deployment secrets
         env:
@@ -197,11 +311,16 @@ jobs:
             --value "$JWT_SECRET" \
             --overwrite
 
+
+      #######################################################################
+      # GENERATE EC2 DEPLOYMENT SCRIPT
+      #######################################################################
+
       - name: Prepare deployment script
         run: |
           set -euo pipefail
 
-          mkdir -p .phase3-runtime
+          mkdir -p ".phase3-runtime"
 
           cp \
             "Phase 3/deployment/nginx.conf" \
@@ -220,26 +339,36 @@ jobs:
             JWT_PARAMETER_NAME
           )
 
-          for variable_name in "${REQUIRED_VARIABLES[@]}"
-          do
-            if [ -z "${!variable_name:-}" ]
-            then
-              echo "Required variable is missing: $variable_name"
+          for VARIABLE_NAME in "${REQUIRED_VARIABLES[@]}"; do
+
+            if [ -z "${!VARIABLE_NAME:-}" ]; then
+              echo "Required variable missing: $VARIABLE_NAME"
               exit 1
             fi
+
           done
+
+
+          ###################################################################
+          # IMAGE INFORMATION
+          ###################################################################
 
           ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
           BACKEND_IMAGE="${ECR_REGISTRY}/zeetafin-be:${IMAGE_TAG}"
+
           FRONTEND_IMAGE="${ECR_REGISTRY}/zeetafin-fe:${IMAGE_TAG}"
 
           RUNTIME_DIRECTORY="/opt/zeetafin"
+
           NGINX_CONFIG="${RUNTIME_DIRECTORY}/nginx.conf"
 
-          mkdir -p "$RUNTIME_DIRECTORY"
 
-          echo "Retrieving deployment secrets from Parameter Store..."
+          ###################################################################
+          # READ APPLICATION SECRETS
+          ###################################################################
+
+          echo "Retrieving deployment secrets..."
 
           DB_PASSWORD="$(
             aws ssm get-parameter \
@@ -262,6 +391,11 @@ jobs:
           test -n "$DB_PASSWORD"
           test -n "$JWT_SECRET"
 
+
+          ###################################################################
+          # ECR LOGIN
+          ###################################################################
+
           echo "Authenticating Docker to Amazon ECR..."
 
           aws ecr get-login-password \
@@ -270,11 +404,21 @@ jobs:
               --username AWS \
               --password-stdin "$ECR_REGISTRY"
 
+
+          ###################################################################
+          # DOCKER NETWORK
+          ###################################################################
+
           echo "Ensuring Docker network exists..."
 
           docker network inspect zeetafin-net \
             >/dev/null 2>&1 ||
             docker network create zeetafin-net
+
+
+          ###################################################################
+          # POSTGRESQL VOLUME
+          ###################################################################
 
           echo "Ensuring PostgreSQL volume exists..."
 
@@ -282,17 +426,27 @@ jobs:
             >/dev/null 2>&1 ||
             docker volume create zeetafin-pgdata
 
-          DATABASE_CREATED=false
 
-          echo "Ensuring PostgreSQL is running..."
+          ###################################################################
+          # POSTGRESQL
+          ###################################################################
+
+          DATABASE_CREATED=false
 
           if docker ps -a \
             --format '{{.Names}}' |
             grep -qx zeetafin-db
           then
+
+            echo "Existing PostgreSQL container detected."
+
             docker start zeetafin-db \
               >/dev/null 2>&1 || true
+
           else
+
+            echo "Creating PostgreSQL container."
+
             DATABASE_CREATED=true
 
             docker run -d \
@@ -304,44 +458,72 @@ jobs:
               -e POSTGRES_DB=zeetafin \
               -v zeetafin-pgdata:/var/lib/postgresql/data \
               postgres:16-alpine
+
           fi
+
+
+          ###################################################################
+          # WAIT FOR POSTGRESQL
+          ###################################################################
 
           echo "Waiting for PostgreSQL..."
 
           DATABASE_READY=false
 
-          for attempt in $(seq 1 30)
-          do
+          for ATTEMPT in $(seq 1 30); do
+
             if docker exec zeetafin-db \
               pg_isready \
-                -U postgres \
-                -d zeetafin \
+              -U postgres \
+              -d zeetafin \
               >/dev/null 2>&1
             then
+
               DATABASE_READY=true
               break
+
             fi
 
-            echo "PostgreSQL attempt: $attempt/30"
+            echo "PostgreSQL attempt: $ATTEMPT/30"
+
             sleep 2
+
           done
 
-          if [ "$DATABASE_READY" != "true" ]
-          then
+
+          if [ "$DATABASE_READY" != "true" ]; then
+
             echo "PostgreSQL did not become ready."
+
             docker logs --tail 100 zeetafin-db
+
             exit 1
+
           fi
 
-          echo "Pulling application images from ECR..."
+
+          ###################################################################
+          # PULL APPLICATION IMAGES
+          ###################################################################
+
+          echo "Pulling backend image..."
 
           docker pull "$BACKEND_IMAGE"
+
+          echo "Pulling frontend image..."
+
           docker pull "$FRONTEND_IMAGE"
+
+
+          ###################################################################
+          # BACKEND
+          ###################################################################
 
           echo "Replacing backend container..."
 
           docker rm -f zeetafin-be \
             >/dev/null 2>&1 || true
+
 
           docker run -d \
             --name zeetafin-be \
@@ -359,12 +541,17 @@ jobs:
             -e DB_LOGGING=false \
             "$BACKEND_IMAGE"
 
-          echo "Waiting for backend API..."
+
+          ###################################################################
+          # WAIT FOR BACKEND
+          ###################################################################
+
+          echo "Waiting for backend..."
 
           BACKEND_READY=false
 
-          for attempt in $(seq 1 30)
-          do
+          for ATTEMPT in $(seq 1 30); do
+
             if docker exec zeetafin-be \
               node -e \
               "fetch('http://127.0.0.1:3001/api/docs')
@@ -374,34 +561,59 @@ jobs:
               .catch(() => process.exit(1));" \
               >/dev/null 2>&1
             then
+
               BACKEND_READY=true
               break
+
             fi
 
-            echo "Backend attempt: $attempt/30"
+            echo "Backend attempt: $ATTEMPT/30"
+
             sleep 2
+
           done
 
-          if [ "$BACKEND_READY" != "true" ]
-          then
-            echo "Backend did not become ready."
+
+          if [ "$BACKEND_READY" != "true" ]; then
+
+            echo "Backend failed to start."
+
             docker logs --tail 100 zeetafin-be
+
             exit 1
+
           fi
 
-          if [ "$DATABASE_CREATED" = "true" ]
-          then
-            echo "Seeding newly created database..."
-            docker exec zeetafin-be node dist/seed.js
+
+          ###################################################################
+          # DATABASE SEED
+          ###################################################################
+
+          if [ "$DATABASE_CREATED" = "true" ]; then
+
+            echo "Seeding new database..."
+
+            docker exec zeetafin-be \
+              node dist/seed.js
+
           else
-            echo "Existing PostgreSQL container detected."
+
+            echo "Existing database detected."
+
             echo "Skipping database seed."
+
           fi
 
-          echo "Replacing frontend container..."
+
+          ###################################################################
+          # FRONTEND
+          ###################################################################
+
+          echo "Replacing frontend..."
 
           docker rm -f zeetafin-fe \
             >/dev/null 2>&1 || true
+
 
           docker run -d \
             --name zeetafin-fe \
@@ -409,12 +621,17 @@ jobs:
             --restart unless-stopped \
             "$FRONTEND_IMAGE"
 
+
+          ###################################################################
+          # WAIT FOR FRONTEND
+          ###################################################################
+
           echo "Waiting for frontend..."
 
           FRONTEND_READY=false
 
-          for attempt in $(seq 1 30)
-          do
+          for ATTEMPT in $(seq 1 30); do
+
             FRONTEND_STATUS="$(
               docker inspect \
                 --format='{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
@@ -426,29 +643,44 @@ jobs:
             if [ "$FRONTEND_STATUS" = "healthy" ] ||
                [ "$FRONTEND_STATUS" = "running" ]
             then
+
               FRONTEND_READY=true
               break
+
             fi
 
             echo "Frontend status: $FRONTEND_STATUS"
-            echo "Frontend attempt: $attempt/30"
+
+            echo "Frontend attempt: $ATTEMPT/30"
 
             sleep 2
+
           done
 
-          if [ "$FRONTEND_READY" != "true" ]
-          then
-            echo "Frontend did not become ready."
+
+          if [ "$FRONTEND_READY" != "true" ]; then
+
+            echo "Frontend failed to start."
+
             docker logs --tail 100 zeetafin-fe
+
             exit 1
+
           fi
+
+
+          ###################################################################
+          # NGINX
+          ###################################################################
 
           echo "Replacing Nginx reverse proxy..."
 
           docker rm -f zeetafin-proxy \
             >/dev/null 2>&1 || true
 
+
           test -f "$NGINX_CONFIG"
+
 
           docker run -d \
             --name zeetafin-proxy \
@@ -458,12 +690,17 @@ jobs:
             -v "$NGINX_CONFIG:/etc/nginx/conf.d/default.conf:ro" \
             nginx:stable
 
-          echo "Running end-to-end health checks..."
+
+          ###################################################################
+          # APPLICATION HEALTH CHECKS
+          ###################################################################
+
+          echo "Running application health checks..."
 
           APPLICATION_READY=false
 
-          for attempt in $(seq 1 30)
-          do
+          for ATTEMPT in $(seq 1 30); do
+
             FRONTEND_CODE="$(
               curl \
                 --silent \
@@ -482,45 +719,72 @@ jobs:
                 true
             )"
 
+
             if [ "$FRONTEND_CODE" = "200" ] &&
                [ "$SWAGGER_CODE" = "200" ]
             then
+
               APPLICATION_READY=true
               break
+
             fi
 
-            echo "Frontend HTTP status: $FRONTEND_CODE"
-            echo "Swagger HTTP status: $SWAGGER_CODE"
-            echo "Application attempt: $attempt/30"
+
+            echo "Frontend HTTP: $FRONTEND_CODE"
+
+            echo "Swagger HTTP: $SWAGGER_CODE"
+
+            echo "Application attempt: $ATTEMPT/30"
+
 
             sleep 2
+
           done
 
-          if [ "$APPLICATION_READY" != "true" ]
-          then
+
+          if [ "$APPLICATION_READY" != "true" ]; then
+
             echo "ZeetaFin health checks failed."
 
             docker logs --tail 100 zeetafin-proxy || true
+
             docker logs --tail 100 zeetafin-fe || true
+
             docker logs --tail 100 zeetafin-be || true
 
             exit 1
+
           fi
 
-          echo "ZeetaFin deployment health checks passed."
+
+          ###################################################################
+          # FINAL STATUS
+          ###################################################################
+
+          echo "ZeetaFin health checks passed."
 
           docker ps \
             --filter name=zeetafin \
             --format \
               'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
 
+
           unset DB_PASSWORD
+
           unset JWT_SECRET
 
+
           echo "ZeetaFin deployment completed successfully."
+
           DEPLOY_SCRIPT
 
+
           chmod +x ".phase3-runtime/deploy.sh"
+
+
+      #######################################################################
+      # ENCODE DEPLOYMENT FILES
+      #######################################################################
 
       - name: Encode deployment files
         run: |
@@ -536,6 +800,11 @@ jobs:
             ".phase3-runtime/nginx.conf" \
             > ".phase3-runtime/nginx.conf.b64"
 
+
+      #######################################################################
+      # BUILD SSM PAYLOAD
+      #######################################################################
+
       - name: Prepare SSM command parameters
         run: |
           set -euo pipefail
@@ -548,6 +817,7 @@ jobs:
             cat ".phase3-runtime/nginx.conf.b64"
           )"
 
+
           jq -n \
             --arg deploy_script "$DEPLOY_SCRIPT_B64" \
             --arg nginx_config "$NGINX_CONFIG_B64" \
@@ -559,21 +829,49 @@ jobs:
             '{
               commands: [
                 "set -euo pipefail",
+
                 "mkdir -p /opt/zeetafin",
-                ("echo " + ($deploy_script | @sh) + " | base64 -d > /opt/zeetafin/deploy.sh"),
-                ("echo " + ($nginx_config | @sh) + " | base64 -d > /opt/zeetafin/nginx.conf"),
-                "chmod 700 /opt/zeetafin/deploy.sh",
+
                 (
-                  "AWS_REGION=" + ($aws_region | @sh) +
-                  " AWS_ACCOUNT_ID=" + ($aws_account_id | @sh) +
-                  " IMAGE_TAG=" + ($image_tag | @sh) +
-                  " DB_PARAMETER_NAME=" + ($db_parameter | @sh) +
-                  " JWT_PARAMETER_NAME=" + ($jwt_parameter | @sh) +
+                  "echo " +
+                  ($deploy_script | @sh) +
+                  " | base64 -d > /opt/zeetafin/deploy.sh"
+                ),
+
+                (
+                  "echo " +
+                  ($nginx_config | @sh) +
+                  " | base64 -d > /opt/zeetafin/nginx.conf"
+                ),
+
+                "chmod 700 /opt/zeetafin/deploy.sh",
+
+                (
+                  "AWS_REGION=" +
+                  ($aws_region | @sh) +
+
+                  " AWS_ACCOUNT_ID=" +
+                  ($aws_account_id | @sh) +
+
+                  " IMAGE_TAG=" +
+                  ($image_tag | @sh) +
+
+                  " DB_PARAMETER_NAME=" +
+                  ($db_parameter | @sh) +
+
+                  " JWT_PARAMETER_NAME=" +
+                  ($jwt_parameter | @sh) +
+
                   " /opt/zeetafin/deploy.sh"
                 )
               ]
             }' \
             > ".phase3-runtime/ssm-parameters.json"
+
+
+      #######################################################################
+      # SEND SSM COMMAND
+      #######################################################################
 
       - name: Send deployment command through SSM
         id: send-command
@@ -598,6 +896,11 @@ jobs:
           echo "command_id=$COMMAND_ID" \
             >> "$GITHUB_OUTPUT"
 
+
+      #######################################################################
+      # WAIT FOR SSM
+      #######################################################################
+
       - name: Wait for SSM deployment
         id: wait-for-deployment
         env:
@@ -617,11 +920,15 @@ jobs:
 
           exit 0
 
+
+      #######################################################################
+      # RETRIEVE RESULT
+      #######################################################################
+
       - name: Retrieve SSM deployment result
         env:
           COMMAND_ID: ${{ steps.send-command.outputs.command_id }}
-          WAITER_EXIT_CODE: >-
-            ${{ steps.wait-for-deployment.outputs.waiter_exit_code }}
+          WAITER_EXIT_CODE: ${{ steps.wait-for-deployment.outputs.waiter_exit_code }}
         run: |
           set -euo pipefail
 
@@ -631,36 +938,51 @@ jobs:
             --instance-id "$MANAGED_INSTANCE_ID" \
             > ".phase3-runtime/ssm-result.json"
 
+
           STATUS="$(
             jq -r '.Status' \
               ".phase3-runtime/ssm-result.json"
           )"
+
 
           RESPONSE_CODE="$(
             jq -r '.ResponseCode' \
               ".phase3-runtime/ssm-result.json"
           )"
 
+
           echo "SSM deployment status: $STATUS"
+
           echo "SSM response code: $RESPONSE_CODE"
+
 
           echo "----- Standard output -----"
 
           jq -r '.StandardOutputContent' \
             ".phase3-runtime/ssm-result.json"
 
+
           echo "----- Standard error -----"
 
           jq -r '.StandardErrorContent' \
             ".phase3-runtime/ssm-result.json"
 
+
           if [ "$STATUS" != "Success" ] ||
              [ "$RESPONSE_CODE" != "0" ] ||
              [ "$WAITER_EXIT_CODE" != "0" ]
           then
+
             echo "ZeetaFin deployment failed."
+
             exit 1
+
           fi
+
+
+      #######################################################################
+      # DELETE TEMPORARY SECRETS
+      #######################################################################
 
       - name: Delete temporary deployment secrets
         if: always()
@@ -675,6 +997,11 @@ jobs:
             --name "$JWT_PARAMETER_NAME" \
             >/dev/null 2>&1 || true
 
+
+      #######################################################################
+      # DEPLOYMENT SUMMARY
+      #######################################################################
+
       - name: Publish deployment summary
         if: success()
         run: |
@@ -685,7 +1012,7 @@ jobs:
             echo "- Managed EC2: \`$MANAGED_INSTANCE_ID\`"
             echo "- Deployment transport: AWS Systems Manager"
             echo "- AWS authentication: GitHub OIDC"
-            echo "- PostgreSQL volume preserved: \`zeetafin-pgdata\`"
+            echo "- PostgreSQL volume: \`zeetafin-pgdata\`"
             echo "- Frontend health check: HTTP 200"
             echo "- Swagger health check: HTTP 200"
           } >> "$GITHUB_STEP_SUMMARY"
